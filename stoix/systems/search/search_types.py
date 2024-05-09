@@ -8,7 +8,7 @@ from jumanji.types import TimeStep
 from optax import OptState
 from typing_extensions import NamedTuple
 
-from stoix.base_types import Action, ActorCriticParams, Done, Observation, Value
+from stoix.base_types import Action, ActorCriticParams,  Done, Observation, Value
 
 SearchApply = Callable[[FrozenDict, chex.PRNGKey, mctx.RootFnOutput], mctx.PolicyOutput]
 RootFnApply = Callable[[FrozenDict, Observation, chex.ArrayTree, chex.PRNGKey], mctx.RootFnOutput]
@@ -16,7 +16,8 @@ EnvironmentStep = Callable[[chex.ArrayTree, Action], Tuple[chex.ArrayTree, TimeS
 
 RepresentationApply = Callable[[FrozenDict, Observation], chex.Array]
 DynamicsApply = Callable[[FrozenDict, chex.Array, chex.Array], Tuple[chex.Array, DistributionLike]]
-
+AfterstateDynamicsApply = Callable[[FrozenDict, chex.Array, chex.Array], chex.Array]
+AfterstatePredictionsApply = Callable[[FrozenDict, chex.Array], chex.Array]
 
 class ExItTransition(NamedTuple):
     done: Done
