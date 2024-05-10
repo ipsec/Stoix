@@ -18,6 +18,7 @@ RepresentationApply = Callable[[FrozenDict, Observation], chex.Array]
 DynamicsApply = Callable[[FrozenDict, chex.Array, chex.Array], Tuple[chex.Array, DistributionLike]]
 AfterstateDynamicsApply = Callable[[FrozenDict, chex.Array, chex.Array], chex.Array]
 AfterstatePredictionsApply = Callable[[FrozenDict, chex.Array], chex.Array]
+EncoderApply = Callable[[FrozenDict, chex.Array], chex.Array]
 
 class ExItTransition(NamedTuple):
     done: Done
@@ -44,10 +45,19 @@ class WorldModelParams(NamedTuple):
     representation_params: FrozenDict
     dynamics_params: FrozenDict
 
+class AfterStateModelParams(NamedTuple):
+    dynamics_params: FrozenDict
+    prediction_params: FrozenDict
 
 class MZParams(NamedTuple):
     prediction_params: ActorCriticParams
     world_model_params: WorldModelParams
+
+class SMZParams(NamedTuple):
+    prediction_params: ActorCriticParams
+    world_model_params: WorldModelParams
+    afterstate_params: AfterStateModelParams
+
 
 
 class ZLearnerState(NamedTuple):

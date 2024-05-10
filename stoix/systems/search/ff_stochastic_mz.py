@@ -42,6 +42,7 @@ from stoix.systems.search.search_types import (
     AfterstateDynamicsApply,
     AfterstatePredictionsApply,
     RootFnApply,
+    SMZParams,
     SearchApply,
     WorldModelParams,
     ZLearnerState,
@@ -93,27 +94,72 @@ def make_root_fn(
 
     return root_fn
 
-def make_decision_recurrent_fn(       
+def make_decision_recurrent_fn( 
+    afterstatedynamics_apply_fn: AfterstateDynamicsApply,
+    afterstateprediction_apply_fn: AfterstatePredictionsApply,
     config: DictConfig,
 ) -> mctx.DecisionRecurrentFn:
     def decision_recurrent_fn(
-        params: MZParams,
+        params: SMZParams,
         rng_key: chex.PRNGKey,
         action: chex.Array,
         state_embedding: chex.ArrayTree,
     ) -> Tuple[mctx.DecisionRecurrentFnOutput, mctx.StochasticRecurrentState]:
-        ...
+        
+        afterstate_embedding = afterstatedynamics_apply_fn(
+            params.afterstate_params.dynamics_params, 
+            state_embedding, 
+            action
+        )
+
+        chance_logits, value = afterstateprediction_apply_fn(
+            params.afterstate_params.prediction_params,
+            afterstate_embedding
+        )
+
+        decision_recurrent_output = mctx.DecisionRecurrentFnOutput(
+            chance_logits = chance_logits,
+            afterstate_value = value
+        )
+
+        return decision_recurrent_output, afterstate_embedding
+
     
-def make_chance_recurrent_fn( 
+def make_chance_recurrent_fn(
+    dynamics_apply_fn: DynamicsApply,
+    actor_apply_fn: ActorApply,
+    critic_apply_fn: DistributionCriticApply,
+    critic_tx_pair: rlax.TxPair,    
+    reward_tx_pair: rlax.TxPair,            
     config: DictConfig,
 ) -> mctx.ChanceRecurrentFn:
     def chance_recurrent_fn(
-        params: MZParams,
+        params: SMZParams,
         rng_key: chex.PRNGKey,
-        action: chex.Array,
+        chance_outcome: chex.Array,
         afterstate_embedding: chex.ArrayTree,
     ) -> Tuple[mctx.ChanceRecurrentFnOutput, mctx.StochasticRecurrentState]:
-        ...        
+
+        state_embedding, reward_dist = dynamics_apply_fn(
+            params.afterstate_params.dynamics_params,
+            afterstate_embedding, 
+            chance_outcome
+        )
+
+        reward = reward_tx_pair.apply_inv(reward_dist.probs)
+
+        pi = actor_apply_fn(params.prediction_params.actor_params, state_embedding)
+        value_dist = critic_apply_fn(params.prediction_params.critic_params, state_embedding)
+        value = critic_tx_pair.apply_inv(value_dist.probs)
+        logits = pi.logits
+
+        chance_recurrent_output = mctx.ChanceRecurrentFnOutput(
+            action_logits = logits,
+            value = value,
+            reward = reward,
+            discount = jnp.ones_like(reward) * config.system.gamma,
+        )
+        return chance_recurrent_output, state_embedding
     return make_decision_recurrent_fn, make_chance_recurrent_fn
 
 
