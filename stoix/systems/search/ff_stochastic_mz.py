@@ -37,6 +37,7 @@ from stoix.networks.model_based import (
     Representation,
     AfterstateDynamics,
     AfterstatePrediction,
+    Encoder,
 )
 from stoix.systems.search.evaluator import search_evaluator_setup
 from stoix.systems.search.search_types import (
@@ -46,8 +47,10 @@ from stoix.systems.search.search_types import (
     RepresentationApply,
     AfterstateDynamicsApply,
     AfterstatePredictionsApply,
+    EncoderApply,
     RootFnApply,
     AfterStateModelParams,
+    EncoderParams,
     SMZParams,
     SearchApply,
     WorldModelParams,
@@ -176,13 +179,21 @@ def get_warmup_fn(
     env: Environment,
     params: MZParams,
     apply_fns: Tuple[
-        RepresentationApply, DynamicsApply, ActorApply, CriticApply, RootFnApply, SearchApply
+        RepresentationApply,
+        DynamicsApply,
+        ActorApply,
+        CriticApply,
+        AfterstateDynamicsApply,
+        AfterstatePredictionsApply,
+        EncoderApply,
+        RootFnApply,
+        SearchApply,
     ],
     buffer_add_fn: Callable,
     config: DictConfig,
 ) -> Callable:
 
-    _, _, _, _, root_fn, _, _, search_apply_fn = apply_fns
+    _, _, _, _, root_fn, _, _, _, search_apply_fn = apply_fns
 
     def warmup(
         env_states: LogEnvState, timesteps: TimeStep, buffer_states: BufferState, keys: chex.PRNGKey
@@ -265,6 +276,7 @@ def get_learner_fn(
         root_fn,
         afterstatedynamics_apply_fn,
         afterstateprediction_apply_fn,
+        encoder_apply_fn,
         search_apply_fn,
     ) = apply_fns
     buffer_add_fn, buffer_sample_fn = buffer_fns
@@ -341,7 +353,7 @@ def get_learner_fn(
                 ]  # B, T=0
 
                 def unroll_fn(
-                    carry: Tuple[chex.Array, chex.Array, MZParams, chex.Array],
+                    carry: Tuple[chex.Array, chex.Array, MZParams, chex.Array, SMZParams],
                     targets: Tuple[chex.Array, chex.Array, chex.Array, chex.Array, chex.Array],
                 ) -> Tuple[chex.Array, chex.Array]:
                     total_loss, state_embedding, muzero_params, mask = carry
@@ -529,6 +541,7 @@ def learner_setup(
         critic_net_key,
         afterstatedynamics_key,
         afterstateprediction_key,
+        encoder_key,
     ) = keys
 
     # Define network and optimiser.
@@ -611,6 +624,16 @@ def learner_setup(
         value_head=afterstateprediction_value_head,
     )
 
+    # Encoder
+    encoder_network_torso = hydra.utils.instantiate(config.network.encoder_network.torso)
+    encoder_chancelogits_head = hydra.utils.instantiate(
+        config.network.encoder_network.chancelogits_head, output_dim=num_actions
+    )
+    encoder_network = Encoder(
+        torso=encoder_network_torso,
+        chancelogits_head=encoder_chancelogits_head,
+    )
+
     lr = make_learning_rate(
         config.system.lr,
         config,
@@ -641,7 +664,6 @@ def learner_setup(
     afterstateprediction_params = afterstateprediction_network.init(
         afterstateprediction_key, afterstate_embedding
     )
-
     world_model_params = WorldModelParams(representation_params, dynamics_params)
     actor_params = actor_network.init(actor_net_key, state_embedding)
     critic_params = critic_network.init(critic_net_key, state_embedding)
@@ -651,9 +673,10 @@ def learner_setup(
     afterstate_params = AfterStateModelParams(
         aftetstatedynamics_params, afterstateprediction_params
     )
+    encoder_params = EncoderParams(encoder_network.init(encoder_key, init_x))
 
     # Pack Params
-    params = SMZParams(prediction_params, world_model_params, afterstate_params)
+    params = SMZParams(prediction_params, world_model_params, afterstate_params, encoder_params)
 
     # Initialise optimiser state.
     opt_state = optim.init(params)
@@ -664,6 +687,7 @@ def learner_setup(
     critic_network_apply_fn = critic_network.apply
     afterstatedynamics_apply_fn = afterstatedynamics_network.apply
     afterstateprediction_apply_fn = afterstateprediction_network.apply
+    encoder_apply_fn = encoder_network.apply
 
     # Initialise tx pairs.
     critic_tx_pair = rlax.muzero_pair(
@@ -717,6 +741,7 @@ def learner_setup(
         root_fn,
         afterstatedynamics_apply_fn,
         afterstateprediction_apply_fn,
+        encoder_apply_fn,
         search_apply_fn,
     )
     update_fns = optim.update
@@ -845,7 +870,8 @@ def run_experiment(_config: DictConfig) -> float:
         critic_net_key,
         afterstatedynamics_key,
         afterstateprediction_key,
-    ) = jax.random.split(jax.random.PRNGKey(config.arch.seed), num=8)
+        encoder_key,
+    ) = jax.random.split(jax.random.PRNGKey(config.arch.seed), num=9)
 
     # Setup learner.
     learn, root_fn, search_apply_fn, learner_state = learner_setup(
@@ -858,6 +884,7 @@ def run_experiment(_config: DictConfig) -> float:
             critic_net_key,
             afterstatedynamics_key,
             afterstateprediction_key,
+            encoder_key,
         ),
         config,
     )

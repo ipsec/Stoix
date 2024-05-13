@@ -52,6 +52,10 @@ class AfterStateModelParams(NamedTuple):
     afterstate_prediction_params: FrozenDict
 
 
+class EncoderParams(NamedTuple):
+    encoder_params: FrozenDict
+
+
 class MZParams(NamedTuple):
     prediction_params: ActorCriticParams
     world_model_params: WorldModelParams
@@ -61,6 +65,7 @@ class SMZParams(NamedTuple):
     prediction_params: ActorCriticParams
     world_model_params: WorldModelParams
     afterstate_params: AfterStateModelParams
+    encoder_params: EncoderParams
 
 
 class ZLearnerState(NamedTuple):

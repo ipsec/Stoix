@@ -66,3 +66,18 @@ class AfterstatePrediction(nn.Module):
         value = self.value_head(next_embedding)
         # TODO: chance_logits must be normalized?
         return chance_logits, value
+
+
+class Encoder(nn.Module):
+    torso: nn.Module
+    chancelogits_head: nn.Module
+    post_processor: Callable[[chex.Array], chex.Array] = min_max_normalize
+    input_layer: nn.Module = ObservationInput()
+
+    @nn.compact
+    def __call__(self, observation: Observation) -> chex.Array:
+        observation = self.input_layer(observation)
+        z = self.torso(observation)
+        z = self.chancelogits_head(z)
+        # TODO: z must be normalized?
+        return self.post_processor(z)
