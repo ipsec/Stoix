@@ -8,7 +8,7 @@ from jumanji.types import TimeStep
 from optax import OptState
 from typing_extensions import NamedTuple
 
-from stoix.base_types import Action, ActorCriticParams,  Done, Observation, Value
+from stoix.base_types import Action, ActorCriticParams, Done, Observation, Value
 
 SearchApply = Callable[[FrozenDict, chex.PRNGKey, mctx.RootFnOutput], mctx.PolicyOutput]
 RootFnApply = Callable[[FrozenDict, Observation, chex.ArrayTree, chex.PRNGKey], mctx.RootFnOutput]
@@ -19,6 +19,7 @@ DynamicsApply = Callable[[FrozenDict, chex.Array, chex.Array], Tuple[chex.Array,
 AfterstateDynamicsApply = Callable[[FrozenDict, chex.Array, chex.Array], chex.Array]
 AfterstatePredictionsApply = Callable[[FrozenDict, chex.Array], chex.Array]
 EncoderApply = Callable[[FrozenDict, chex.Array], chex.Array]
+
 
 class ExItTransition(NamedTuple):
     done: Done
@@ -45,19 +46,21 @@ class WorldModelParams(NamedTuple):
     representation_params: FrozenDict
     dynamics_params: FrozenDict
 
+
 class AfterStateModelParams(NamedTuple):
-    dynamics_params: FrozenDict
-    prediction_params: FrozenDict
+    afterstate_dynamics_params: FrozenDict
+    afterstate_prediction_params: FrozenDict
+
 
 class MZParams(NamedTuple):
     prediction_params: ActorCriticParams
     world_model_params: WorldModelParams
 
+
 class SMZParams(NamedTuple):
     prediction_params: ActorCriticParams
     world_model_params: WorldModelParams
     afterstate_params: AfterStateModelParams
-
 
 
 class ZLearnerState(NamedTuple):

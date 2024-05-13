@@ -32,7 +32,12 @@ from stoix.base_types import (
 from stoix.networks.base import FeedForwardActor as Actor
 from stoix.networks.base import FeedForwardCritic as Critic
 from stoix.networks.inputs import EmbeddingInput
-from stoix.networks.model_based import Dynamics, Representation
+from stoix.networks.model_based import (
+    Dynamics,
+    Representation,
+    AfterstateDynamics,
+    AfterstatePrediction,
+)
 from stoix.systems.search.evaluator import search_evaluator_setup
 from stoix.systems.search.search_types import (
     DynamicsApply,
@@ -42,6 +47,7 @@ from stoix.systems.search.search_types import (
     AfterstateDynamicsApply,
     AfterstatePredictionsApply,
     RootFnApply,
+    AfterStateModelParams,
     SMZParams,
     SearchApply,
     WorldModelParams,
@@ -94,56 +100,58 @@ def make_root_fn(
 
     return root_fn
 
-def make_decision_recurrent_fn( 
+
+def make_decision_recurrent_fn(
     afterstatedynamics_apply_fn: AfterstateDynamicsApply,
     afterstateprediction_apply_fn: AfterstatePredictionsApply,
+    critic_tx_pair: rlax.TxPair,
     config: DictConfig,
-) -> mctx.DecisionRecurrentFn:
+) -> mctx._src.base.DecisionRecurrentFn:
     def decision_recurrent_fn(
         params: SMZParams,
         rng_key: chex.PRNGKey,
         action: chex.Array,
         state_embedding: chex.ArrayTree,
-    ) -> Tuple[mctx.DecisionRecurrentFnOutput, mctx.StochasticRecurrentState]:
-        
+    ) -> Tuple[mctx.DecisionRecurrentFnOutput, mctx._src.base.StochasticRecurrentState]:
+
         afterstate_embedding = afterstatedynamics_apply_fn(
-            params.afterstate_params.dynamics_params, 
-            state_embedding, 
-            action
+            params.afterstate_params.afterstate_dynamics_params, state_embedding, action
         )
 
         chance_logits, value = afterstateprediction_apply_fn(
-            params.afterstate_params.prediction_params,
-            afterstate_embedding
+            params.afterstate_params.afterstate_prediction_params, afterstate_embedding
         )
 
+        value = critic_tx_pair.apply_inv(value.probs)
+
         decision_recurrent_output = mctx.DecisionRecurrentFnOutput(
-            chance_logits = chance_logits,
-            afterstate_value = value
+            chance_logits=chance_logits, afterstate_value=value
         )
 
         return decision_recurrent_output, afterstate_embedding
 
-    
+    return decision_recurrent_fn
+
+
 def make_chance_recurrent_fn(
     dynamics_apply_fn: DynamicsApply,
     actor_apply_fn: ActorApply,
     critic_apply_fn: DistributionCriticApply,
-    critic_tx_pair: rlax.TxPair,    
-    reward_tx_pair: rlax.TxPair,            
+    critic_tx_pair: rlax.TxPair,
+    reward_tx_pair: rlax.TxPair,
     config: DictConfig,
-) -> mctx.ChanceRecurrentFn:
+) -> mctx._src.base.ChanceRecurrentFn:
     def chance_recurrent_fn(
         params: SMZParams,
         rng_key: chex.PRNGKey,
         chance_outcome: chex.Array,
         afterstate_embedding: chex.ArrayTree,
-    ) -> Tuple[mctx.ChanceRecurrentFnOutput, mctx.StochasticRecurrentState]:
+    ) -> Tuple[mctx.ChanceRecurrentFnOutput, mctx._src.base.StochasticRecurrentState]:
 
         state_embedding, reward_dist = dynamics_apply_fn(
-            params.afterstate_params.dynamics_params,
-            afterstate_embedding, 
-            chance_outcome
+            params.world_model_params.dynamics_params,
+            afterstate_embedding,
+            chance_outcome,
         )
 
         reward = reward_tx_pair.apply_inv(reward_dist.probs)
@@ -154,50 +162,14 @@ def make_chance_recurrent_fn(
         logits = pi.logits
 
         chance_recurrent_output = mctx.ChanceRecurrentFnOutput(
-            action_logits = logits,
-            value = value,
-            reward = reward,
-            discount = jnp.ones_like(reward) * config.system.gamma,
+            action_logits=logits,
+            value=value,
+            reward=reward,
+            discount=jnp.ones_like(reward) * config.system.gamma,
         )
         return chance_recurrent_output, state_embedding
-    return make_decision_recurrent_fn, make_chance_recurrent_fn
 
-
-def make_recurrent_fn(
-    dynamics_apply_fn: DynamicsApply,
-    actor_apply_fn: ActorApply,
-    critic_apply_fn: DistributionCriticApply,
-    critic_tx_pair: rlax.TxPair,
-    reward_tx_pair: rlax.TxPair,
-    config: DictConfig,
-) -> mctx.RecurrentFn:
-    def recurrent_fn(
-        params: MZParams,
-        rng_key: chex.PRNGKey,
-        action: chex.Array,
-        state_embedding: chex.ArrayTree,
-    ) -> Tuple[mctx.RecurrentFnOutput, chex.ArrayTree]:
-
-        next_state_embedding, next_reward_dist = dynamics_apply_fn(
-            params.world_model_params.dynamics_params, state_embedding, action
-        )
-        next_reward = reward_tx_pair.apply_inv(next_reward_dist.probs)
-
-        pi = actor_apply_fn(params.prediction_params.actor_params, next_state_embedding)
-        value_dist = critic_apply_fn(params.prediction_params.critic_params, next_state_embedding)
-        value = critic_tx_pair.apply_inv(value_dist.probs)
-        logits = pi.logits
-
-        recurrent_fn_output = mctx.RecurrentFnOutput(
-            reward=next_reward,
-            discount=jnp.ones_like(next_reward) * config.system.gamma,
-            prior_logits=logits,
-            value=value,
-        )
-
-        return recurrent_fn_output, next_state_embedding
-
-    return recurrent_fn
+    return chance_recurrent_fn
 
 
 def get_warmup_fn(
@@ -210,7 +182,7 @@ def get_warmup_fn(
     config: DictConfig,
 ) -> Callable:
 
-    _, _, _, _, root_fn, search_apply_fn = apply_fns
+    _, _, _, _, root_fn, _, _, search_apply_fn = apply_fns
 
     def warmup(
         env_states: LogEnvState, timesteps: TimeStep, buffer_states: BufferState, keys: chex.PRNGKey
@@ -291,6 +263,8 @@ def get_learner_fn(
         actor_apply_fn,
         critic_apply_fn,
         root_fn,
+        afterstatedynamics_apply_fn,
+        afterstateprediction_apply_fn,
         search_apply_fn,
     ) = apply_fns
     buffer_add_fn, buffer_sample_fn = buffer_fns
@@ -525,6 +499,8 @@ def parse_search_method(config: DictConfig) -> Any:
         search_method = mctx.muzero_policy
     elif config.system.search_method.lower() == "gumbel":
         search_method = mctx.gumbel_muzero_policy
+    elif config.system.search_method.lower() == "stochastic_muzero":
+        search_method = mctx.stochastic_muzero_policy
     else:
         raise ValueError(f"Search method {config.system.search_method} not supported.")
 
@@ -545,7 +521,15 @@ def learner_setup(
     config.system.action_dim = num_actions
 
     # PRNG keys.
-    key, representation_net_key, dynamics_net_key, actor_net_key, critic_net_key = keys
+    (
+        key,
+        representation_net_key,
+        dynamics_net_key,
+        actor_net_key,
+        critic_net_key,
+        afterstatedynamics_key,
+        afterstateprediction_key,
+    ) = keys
 
     # Define network and optimiser.
     actor_torso = hydra.utils.instantiate(config.network.actor_network.pre_torso)
@@ -594,6 +578,39 @@ def learner_setup(
         input_layer=dynamics_input_layer,
     )
 
+    # Afterstate Dynamics
+    afterstatedynamics_network_torso = hydra.utils.instantiate(
+        config.network.afterstatedynamics_network.torso
+    )
+    afterstatedynamics_embedding_head = hydra.utils.instantiate(
+        config.network.afterstatedynamics_network.embedding_head
+    )
+    afterstatedynamics_input_layer = hydra.utils.instantiate(
+        config.network.afterstatedynamics_network.input_layer, action_dim=num_actions
+    )
+    afterstatedynamics_network = AfterstateDynamics(
+        torso=afterstatedynamics_network_torso,
+        embedding_head=afterstatedynamics_embedding_head,
+        input_layer=afterstatedynamics_input_layer,
+    )
+
+    # Afterstate Prediction
+    afterstateprediction_network_torso = hydra.utils.instantiate(
+        config.network.afterstateprediction_network.torso
+    )
+    afterstatedynamics_chancelogits_head = hydra.utils.instantiate(
+        config.network.afterstateprediction_network.chancelogits_head, output_dim=num_actions
+    )
+    afterstateprediction_value_head = hydra.utils.instantiate(
+        config.network.afterstateprediction_network.value_head
+    )
+
+    afterstateprediction_network = AfterstatePrediction(
+        torso=afterstateprediction_network_torso,
+        chancelogits_head=afterstatedynamics_chancelogits_head,
+        value_head=afterstateprediction_value_head,
+    )
+
     lr = make_learning_rate(
         config.system.lr,
         config,
@@ -615,13 +632,28 @@ def learner_setup(
     representation_params = representation_network.init(representation_net_key, init_x)
     state_embedding = representation_network.apply(representation_params, init_x)
     dynamics_params = dynamics_network.init(dynamics_net_key, state_embedding, init_a)
+    aftetstatedynamics_params = afterstatedynamics_network.init(
+        afterstatedynamics_key, state_embedding, init_a
+    )
+    afterstate_embedding = afterstatedynamics_network.apply(
+        aftetstatedynamics_params, state_embedding, init_a
+    )
+    afterstateprediction_params = afterstateprediction_network.init(
+        afterstateprediction_key, afterstate_embedding
+    )
+
     world_model_params = WorldModelParams(representation_params, dynamics_params)
     actor_params = actor_network.init(actor_net_key, state_embedding)
     critic_params = critic_network.init(critic_net_key, state_embedding)
-
-    # Pack params.
     prediction_params = ActorCriticParams(actor_params, critic_params)
-    params = MZParams(prediction_params, world_model_params)
+
+    # Stochastic Muzero Params
+    afterstate_params = AfterStateModelParams(
+        aftetstatedynamics_params, afterstateprediction_params
+    )
+
+    # Pack Params
+    params = SMZParams(prediction_params, world_model_params, afterstate_params)
 
     # Initialise optimiser state.
     opt_state = optim.init(params)
@@ -630,6 +662,8 @@ def learner_setup(
     dynamics_network_apply_fn = dynamics_network.apply
     actor_network_apply_fn = actor_network.apply
     critic_network_apply_fn = critic_network.apply
+    afterstatedynamics_apply_fn = afterstatedynamics_network.apply
+    afterstateprediction_apply_fn = afterstateprediction_network.apply
 
     # Initialise tx pairs.
     critic_tx_pair = rlax.muzero_pair(
@@ -651,7 +685,11 @@ def learner_setup(
         critic_network_apply_fn,
         critic_tx_pair,
     )
-    model_recurrent_fn = make_recurrent_fn(
+    model_decision_recurrent_fn = make_decision_recurrent_fn(
+        afterstatedynamics_apply_fn, afterstateprediction_apply_fn, critic_tx_pair, config
+    )
+
+    model_chance_recurrent_fn = make_chance_recurrent_fn(
         dynamics_network_apply_fn,
         actor_network_apply_fn,
         critic_network_apply_fn,
@@ -659,10 +697,12 @@ def learner_setup(
         reward_tx_pair,
         config,
     )
+
     search_method = parse_search_method(config)
     search_apply_fn = functools.partial(
         search_method,
-        recurrent_fn=model_recurrent_fn,
+        decision_recurrent_fn=model_decision_recurrent_fn,
+        chance_recurrent_fn=model_chance_recurrent_fn,
         num_simulations=config.system.num_simulations,
         max_depth=config.system.max_depth,
         **config.system.search_method_kwargs,
@@ -675,6 +715,8 @@ def learner_setup(
         actor_network_apply_fn,
         critic_network_apply_fn,
         root_fn,
+        afterstatedynamics_apply_fn,
+        afterstateprediction_apply_fn,
         search_apply_fn,
     )
     update_fns = optim.update
@@ -794,13 +836,30 @@ def run_experiment(_config: DictConfig) -> float:
     env, eval_env = environments.make(config=config)
 
     # PRNG keys.
-    key, key_e, representation_key, dynamics_key, actor_net_key, critic_net_key = jax.random.split(
-        jax.random.PRNGKey(config.arch.seed), num=6
-    )
+    (
+        key,
+        key_e,
+        representation_key,
+        dynamics_key,
+        actor_net_key,
+        critic_net_key,
+        afterstatedynamics_key,
+        afterstateprediction_key,
+    ) = jax.random.split(jax.random.PRNGKey(config.arch.seed), num=8)
 
     # Setup learner.
     learn, root_fn, search_apply_fn, learner_state = learner_setup(
-        env, (key, representation_key, dynamics_key, actor_net_key, critic_net_key), config
+        env,
+        (
+            key,
+            representation_key,
+            dynamics_key,
+            actor_net_key,
+            critic_net_key,
+            afterstatedynamics_key,
+            afterstateprediction_key,
+        ),
+        config,
     )
 
     # Setup evaluator.
@@ -921,7 +980,9 @@ def run_experiment(_config: DictConfig) -> float:
     return eval_performance
 
 
-@hydra.main(config_path="../../configs", config_name="default_ff_mz.yaml", version_base="1.2")
+@hydra.main(
+    config_path="../../configs", config_name="default_ff_stochastic_mz.yaml", version_base="1.2"
+)
 def hydra_entry_point(cfg: DictConfig) -> float:
     """Experiment entry point."""
     # Allow dynamic attributes.

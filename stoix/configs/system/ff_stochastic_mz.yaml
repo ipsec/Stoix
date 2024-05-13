@@ -24,7 +24,7 @@ max_grad_norm: 0.5 # Maximum norm of the gradients for a weight update.
 decay_learning_rates: False # Whether learning rates should be linearly decayed during training.
 num_simulations: 25 # Number of simulations to run.
 max_depth: ~ # Maximum depth of the search tree.
-search_method : muzero # Search method to use. Options: gumbel, muzero.
+search_method : stochastic_muzero # Search method to use. Options: gumbel, muzero, stochastich_muzero.
 search_method_kwargs: {} # Additional kwargs for the search method.
 critic_vmin: -300.0 # Minimum value for the critic.
 critic_vmax: 300.0 # Maximum value for the critic.
