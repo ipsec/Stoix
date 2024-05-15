@@ -358,16 +358,60 @@ def get_learner_fn(
                 ) -> Tuple[chex.Array, chex.Array]:
                     total_loss, state_embedding, muzero_params, mask = carry
                     action, reward_target, search_policy, value_targets, done = targets
+
+                    afterstate_embedding = afterstatedynamics_apply_fn(
+                        muzero_params.afterstate_params.afterstate_dynamics_params,
+                        state_embedding,
+                        action,
+                    )
+
+                    chance_logits, afterstate_value = afterstateprediction_apply_fn(
+                        muzero_params.afterstate_params.afterstate_prediction_params,
+                        afterstate_embedding,
+                    )
+
+                    afterstate_value = critic_tx_pair.apply_inv(afterstate_value.probs)
+
+                    # TODO: here the encoder must receive the observation
+                    chance_code_embedding = encoder_apply_fn(
+                        muzero_params.encoder_params.encoder_params, state_embedding
+                    )
+                    chance_code_probs = jax.nn.one_hot(
+                        jnp.argmax(chance_code_embedding), config.system.action_dim
+                    )
+
+                    # STE - straight through estimator
+                    chance_code_probs = (
+                        jax.lax.stop_gradient(chance_code_probs - chance_code_embedding)
+                        + chance_code_embedding
+                    )
+                    chance_code_probs_stopped = jax.lax.stop_gradient(chance_code_probs)
+
+                    chance_loss = optax.softmax_cross_entropy(
+                        chance_logits, chance_code_probs_stopped
+                    )
+                    afterstate_value_loss = optax.softmax_cross_entropy(
+                        afterstate_value, value_targets
+                    )
+                    commitment_loss = jnp.mean(
+                        (chance_code_probs_stopped - chance_code_embedding) ** 2
+                    )
+
                     actor_policy = actor_apply_fn(
                         muzero_params.prediction_params.actor_params, state_embedding
                     )
                     value_dist = critic_apply_fn(
                         muzero_params.prediction_params.critic_params, state_embedding
                     )
-                    state_embedding = scale_gradient(state_embedding, 0.5)
+
+                    chance_code = jnp.argmax(chance_code_probs_stopped, axis=-1)
                     next_state_embedding, predicted_reward = dynamics_apply_fn(
-                        muzero_params.world_model_params.dynamics_params, state_embedding, action
+                        muzero_params.world_model_params.dynamics_params,
+                        afterstate_embedding,
+                        chance_code,
                     )
+
+                    next_state_embedding = scale_gradient(next_state_embedding, 0.5)
 
                     # CALCULATE ACTOR LOSS
                     # We use the KL divergence between the search policy and the actor policy
@@ -404,6 +448,9 @@ def get_learner_fn(
                         "value": value_loss,
                         "reward": reward_loss,
                         "entropy": entropy_loss,
+                        "chance_loss": chance_loss,
+                        "afterstate_value_loss": afterstate_value_loss,
+                        "commitment_loss": commitment_loss,
                     }
                     # UPDATE LOSS
                     total_loss = jax.tree_util.tree_map(
@@ -428,6 +475,9 @@ def get_learner_fn(
                     "value": jnp.array(0.0),
                     "reward": jnp.array(0.0),
                     "entropy": jnp.array(0.0),
+                    "chance_loss": jnp.array(0.0),
+                    "afterstate_value_loss": jnp.array(0.0),
+                    "commitment_loss": jnp.array(0.0),
                 }
                 init_mask = jnp.ones((config.system.batch_size,))
                 (losses, _, _, _), _ = jax.lax.scan(
@@ -439,9 +489,9 @@ def get_learner_fn(
                     lambda x: x / (config.system.sample_sequence_length - 1), losses
                 )
 
-                total_loss = (
-                    losses["actor"] + losses["value"] + losses["reward"] - losses["entropy"]
-                )
+                L_chance_loss = (losses["chance_loss"] + losses["afterstate_value_loss"] + losses["commitment_loss"])
+                L_muzero_loss = (losses["actor"] + losses["value"] + losses["reward"] - losses["entropy"])
+                total_loss = L_muzero_loss + L_chance_loss
 
                 return total_loss, losses
 
@@ -673,7 +723,7 @@ def learner_setup(
     afterstate_params = AfterStateModelParams(
         aftetstatedynamics_params, afterstateprediction_params
     )
-    encoder_params = EncoderParams(encoder_network.init(encoder_key, init_x))
+    encoder_params = EncoderParams(encoder_network.init(encoder_key, state_embedding))
 
     # Pack Params
     params = SMZParams(prediction_params, world_model_params, afterstate_params, encoder_params)

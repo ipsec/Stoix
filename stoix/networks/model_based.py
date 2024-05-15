@@ -72,10 +72,13 @@ class Encoder(nn.Module):
     torso: nn.Module
     chancelogits_head: nn.Module
     post_processor: Callable[[chex.Array], chex.Array] = min_max_normalize
-    input_layer: nn.Module = ObservationInput()
+    # TODO: Change from EmbeddingInput() to ObservationInput()
+    input_layer: nn.Module = EmbeddingInput()
 
     @nn.compact
-    def __call__(self, observation: Observation) -> chex.Array:
+    # TODO: Change from chex.Array to observation
+    # def __call__(self, observation: Observation) -> chex.Array:
+    def __call__(self, observation: chex.Array) -> chex.Array:
         observation = self.input_layer(observation)
         z = self.torso(observation)
         z = self.chancelogits_head(z)
